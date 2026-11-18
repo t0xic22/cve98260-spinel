@@ -109,3 +109,8 @@ tools/extract/     提取器与检测（Rust，bin timer-extract）
 
 - `timer/timer.c` 改编自 `woshigenm/CVE-2026-98260` 的 `src/uid0.c` 与 `src/poc.c`（MIT）
 - `tools/extract/` 来自 `YuKongA/ghostlock-app/tools/extract_rs`（Apache-2.0）
+
+## Créditos
+
+Créditos completos a todos os projetos e autores usados: [CREDITS.md](CREDITS.md).
+
