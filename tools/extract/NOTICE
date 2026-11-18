@@ -1,0 +1,19 @@
+timer-extract
+Copyright (c) 2026 YuKongA
+
+This directory is licensed under the Apache License, Version 2.0
+(see LICENSE).
+
+This product includes software developed by the ghostlock-app project,
+`tools/extract_rs`, licensed under the Apache License, Version 2.0:
+
+  src/boot.rs             Android boot v3/v4, raw arm64 Image, gzip, LZ4
+  src/btf.rs              minimal BTF parser for struct offsets
+  src/disasm.rs           ARM64 disassembly adapter over yaxpeax-arm
+  src/error.rs            extraction error type
+  src/kallsyms.rs         /proc/kallsyms text parsing
+  src/kallsyms_finder.rs  in-image kallsyms recovery
+
+Each vendored file keeps a header naming its upstream file and states that the
+body below it is kept byte-identical. `derive.rs`,`kbuilds.rs`, `report.rs`,
+`lib.rs` and `main.rs` are this repository's work.
