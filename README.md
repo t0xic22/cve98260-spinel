@@ -1,25 +1,33 @@
-# CVE-2026-98260 Timer LPE
+# CVE-2026-98260 — POSIX CPU Timer LPE (spinel fork)
 
-CVE-2026-98260 POSIX CPU timer UAF 移植，支持情况见「内核支持」
+This is a port of the CVE-2026-98260 POSIX CPU-timer use-after-free exploit. It
+gains `uid=0` on Android devices running a supported kernel. The original project
+is [YuKongA/CVE-2026-98260](https://github.com/YuKongA/CVE-2026-98260); this fork
+adds the profile for the **Redmi Note 15 4G (`spinel`)** and extensive local
+experimentation. See [CREDITS.md](CREDITS.md).
 
-两条链：
+## What the two attack chains actually do
 
-- `timer`：真实 cred 零写 → `uid=0`、`u:r:shell:s0`（shell 域 root，bset caps）
-- `timer fake`：fake cred（full caps）→ 安装版 KernelSU `libksud.so` late-load
+| Mode | Mechanism | Result |
+|---|---|---|
+| `timer` (default) | Zero-write into the **real** `cred` structure, then `setuid(0)` and `exec sh` | `uid=0`, context `u:r:shell:s0`. This is the **stable** path used by the app. |
+| `timer fake` | Build a **fake `cred`** with full capabilities and `u:r:kernel:s0`, point `task->cred` at it, then run `ksud late-load` | On the upstream-supported devices this loads KernelSU and yields `su` in `u:r:ksu:s0`. **On the spinel/MIUI firmware this path is unstable** — it either stalls in the SLUB spray or panics the kernel. |
 
-## 状态
+Status observed on the original devices:
 
-| 路径                                     | 结果                                                              |
-| ---------------------------------------- | ----------------------------------------------------------------- |
-| real cred 零写 + `setuid(0)` + `exec sh` | `uid=0`、`u:r:shell:s0`、`ROOT_SHELL_OK`                          |
-| fake cred + `ksud late-load`             | 安装版 `libksud.so`（uapi 6）、`KSU_LOADED`、`su` 为 `u:r:ksu:s0` |
+| Path | Result |
+|---|---|
+| real-cred zero write + `setuid(0)` + `exec sh` | `uid=0`, `u:r:shell:s0`, `ROOT_SHELL_OK` |
+| fake cred + `ksud late-load` | installed `libksud.so` (uapi 6), `KSU_LOADED`, `su` in `u:r:ksu:s0` |
 
-## 环境
+## Requirements
 
-- 启动身份：adb/shell（uid 2000，`u:r:shell:s0`），可读 tracefs 与 `/proc/slabinfo`
-- KernelSU manager 已安装（`me.weishu.kernelsu`）时，`fake` 会自动使用其 `lib/arm64/libksud.so`
+- Start identity: `adb shell` (uid 2000, `u:r:shell:s0`). The shell domain can read
+  `tracefs` and `/proc/slabinfo`, which a normal app cannot.
+- When the KernelSU manager (`me.weishu.kernelsu`) is installed, `fake` mode uses
+  its `lib/arm64/libksud.so` automatically.
 
-## 构建
+## How the build works
 
 ```sh
 cd timer
@@ -31,45 +39,60 @@ $NDK/aarch64-linux-android35-clang -O2 -std=gnu11 -static \
     -Wl,-z,norelro -pthread
 ```
 
-## 内核支持
+`-static` is important: the upstream binary is a static ELF. Early local builds
+that omitted it were dynamic (~45 KB instead of ~311 KB) and behaved differently
+during the root-child `execve`.
 
-per-build 常量各自一个 `timer/kbuilds/<release>.h`，由 `timer/kbuilds.h` 索引；`timer.c` 只含逻辑，`timer` 按 `uname -r` 整串匹配，未命中时打印已知 build 并退出
+## Kernel profiles — how matching works
 
-已支持：
+Each kernel has its own constant table in `timer/kbuilds/<release>.h`, indexed by
+`timer/kbuilds.h`. `timer.c` contains only logic. At startup the binary calls
+`uname()` and matches the **exact** release string. On a miss it prints the known
+builds and exits — it never guesses offsets.
+
+Upstream-supported releases:
 
 - `6.12.69-android16-6-g242e1a07f878-ab15865446-4k`
 - `6.12.69-android16-6-g5fd39602326e-ab16372235-4k`
 
-新增内核（检测 98260 + 写入并登记 profile；退出码 0 可打、3 已修复、1 出错）：
+Added in this fork:
+
+- `6.12.69-android16-6-g014ca48a80ee-ab15889839-4k` (spinel). Its constants are
+  identical to `g242e1a07f878`; they were derived from boot.img analysis and
+  verified against the kernel BTF (`parse_btf.py`, `fw/btf.bin` in the notes repo).
+
+To add another kernel (detect CVE-2026-98260, write and register a profile;
+exit 0 = exploitable, 3 = patched, 1 = error):
 
 ```sh
 cargo build --release --manifest-path tools/extract/Cargo.toml
 tools/extract/target/release/timer-extract boot.img --add
 ```
 
-`tools/*.c` 用于核对 call site、raw record、timer 泄漏与 8 KiB AF_UNIX 回收通道。
+The `tools/*.c` programs are diagnostics for checking call sites, raw trace
+records, timer leaks and the 8 KiB AF_UNIX reclamation channel.
 
-## 使用
+## Usage — and what each command does
 
 ```sh
 adb push timer /data/local/tmp/timer
 adb shell chmod 755 /data/local/tmp/timer
 
-# 诊断
-adb shell /data/local/tmp/timer build   # 打印内核 release 与命中的 profile
-adb shell /data/local/tmp/timer ids     # 探测 tracefs page event id
-adb shell /data/local/tmp/timer leak    # 只做 base/cred/task 泄漏，不触发 UAF
+# Diagnostics (no exploit triggered)
+adb shell /data/local/tmp/timer build   # print kernel release + matched profile
+adb shell /data/local/tmp/timer ids     # probe tracefs page event IDs
+adb shell /data/local/tmp/timer leak    # leak base/cred/task only; no UAF
 
-# uid-0 shell（真实 cred）
-adb shell /data/local/tmp/timer         # id + context + ROOT_SHELL_OK
-adb shell /data/local/tmp/timer shell   # 交互 sh
+# Stable root shell (real cred)
+adb shell /data/local/tmp/timer         # prints id + context + ROOT_SHELL_OK
+adb shell /data/local/tmp/timer shell   # interactive root sh
 
-# KernelSU（fake cred + 安装版 ksud）
+# KernelSU attempt (fake cred + installed ksud)
 adb shell 'cd /data/local/tmp && setsid ./timer fake >timer.log 2>&1 </dev/null &'
 adb shell cat /data/local/tmp/timer.log
 ```
 
-`fake` 成功标志：
+Success markers for `fake` on a compatible device:
 
 ```text
 [ksu] ksud=.../lib/arm64/libksud.so version=ksud 3.3.1-24-g528bafc5 (uapi: 6)
@@ -77,40 +100,52 @@ KSU_LOADED
 kernelsu ... Live
 ```
 
-```sh
-adb shell /system/bin/su -c id   # uid=0 ... context=u:r:ksu:s0
-```
+Then `adb shell /system/bin/su -c id` should report `uid=0 ... context=u:r:ksu:s0`.
 
-## 安全
+## Modes added in this fork
 
-- 失败 state 会 **park 并持有 zombie**；不要 kill，重启是唯一安全清理
-- 触发 UAF 后不要对 parked 进程 `timeout`/`kill`，否则可能 panic
-- 使用 KernelSU 模拟软重启能正常保留越狱状态，硬重启后 root 正常消失
+These are documented here because the binaries in `timer/` are named after them:
 
-## 目录
+| Mode | What it changes |
+|---|---|
+| `perm` | Performs a single zero-write to `selinux_state-7`, flipping the enforcing byte to 0. SELinux stays Permissive until reboot. Useful because `dmesg`, `tracefs` and `debug.*` props are otherwise denied to the shell domain. |
+| `--ghostlock-app-call` | Detected when launched by the GhostLock app. In some experimental builds this switched to fake-cred mode; the **stable** builds ignore it and use the real-cred path. |
+| props mode | When `/data/local/tmp/glk_props_mode` exists, `write_ksu_script()` emits a script that runs `setprop`/`settings` as uid 0 instead of the KernelSU handoff. Note: on this ROM `persist.sys.*` setprop is still denied by the property service. |
+| `v18`–`v25` experiments | Various attempts to combine a full-capability fake cred with the stable root-child path. All either stalled or panicked on this firmware; kept for the record. |
+
+## Safety — read this
+
+- A failed state **parks the process and holds a zombie**. Do **not** kill it;
+  rebooting is the only safe cleanup.
+- Never apply `timeout` or `kill` to a parked process after triggering the UAF —
+  it can panic the kernel.
+- `pm kill`/`kill -9` on a stalled `libghostlock.so` was tested here and **did**
+  cause a reboot. Always reboot cleanly instead.
+- KernelSU soft-reboot preserves the jailbreak state; a hard reboot removes root
+  as expected.
+
+## Layout
 
 ```text
-timer/timer.c      exploit
-timer/kbuilds.h    内核 profile 索引（include 列表 + 指针表）
-timer/kbuilds/     各内核的 profile（<release>.h）
-timer/timer        静态产物
-tools/*.c          移植诊断源码
-tools/extract/     提取器与检测（Rust，bin timer-extract）
+timer/timer.c      exploit logic
+timer/kbuilds.h    profile index (include list + pointer table)
+timer/kbuilds/     one <release>.h per kernel
+timer/timer*       built binaries (static upstream build + local variants)
+tools/*.c          ported diagnostic sources
+tools/extract/     Rust extractor/detector (binary: timer-extract)
 ```
 
-## 许可证
+## Licence
 
-| 路径                            | 许可证                                                          |
-| ------------------------------- | --------------------------------------------------------------- |
-| 根目录（`timer/`、`tools/*.c`） | MIT，见 [`LICENSE`](LICENSE)                                    |
-| `tools/extract/`                | Apache-2.0，见 [`tools/extract/LICENSE`](tools/extract/LICENSE) |
+| Path | Licence |
+|---|---|
+| Repository root (`timer/`, `tools/*.c`) | MIT — see [LICENSE](LICENSE) |
+| `tools/extract/` | Apache-2.0 — see `tools/extract/LICENSE` |
 
-第三方来源：
+Third-party origins: `timer/timer.c` is adapted from `woshigenm/CVE-2026-98260`
+(`src/uid0.c`, `src/poc.c`, MIT); `tools/extract/` came from
+`YuKongA/ghostlock-app/tools/extract_rs` (Apache-2.0).
 
-- `timer/timer.c` 改编自 `woshigenm/CVE-2026-98260` 的 `src/uid0.c` 与 `src/poc.c`（MIT）
-- `tools/extract/` 来自 `YuKongA/ghostlock-app/tools/extract_rs`（Apache-2.0）
+## Créditos / Credits
 
-## Créditos
-
-Créditos completos a todos os projetos e autores usados: [CREDITS.md](CREDITS.md).
-
+Full credits: [CREDITS.md](CREDITS.md).
